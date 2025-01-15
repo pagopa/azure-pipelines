@@ -4,7 +4,6 @@ import * as core from '@actions/core';
 import * as azdev from "azure-devops-node-api";
 import * as BuildInterfaces from 'azure-devops-node-api/interfaces/BuildInterfaces';
 
-// Verifica presenza del token
 if (!process.env.TEST_AZURE_DEVOPS_TOKEN) {
     throw new Error('TEST_AZURE_DEVOPS_TOKEN environment variable is required');
 }
@@ -17,19 +16,18 @@ const TEST_CONFIG = {
     
     pipeline: {
         name: 'p4pa-payhub-deploy-aks.deploy',
-        variables: {
-            DEV_AGENT_POOL: 'p4pa-dev-linux-app',
-            DEV_ARGOCD_SERVER: 'argocd.internal.dev.p4pa.pagopa.it',
-            DEV_ARGOCD_USERNAME: 'admin',
-            ENVIRONMENT: 'dev'
-        },
-        templateParameters: {
-            "ENVIRONMENT": "dev",
-            "DEPLOY_TYPE": "aks",
-            "APP_NAME": "p4pa-payhub-deploy-aks",
-            "ARGOCD_CONFIG_REPO": "pagopa/p4pa-payhub-deploy-aks",
-            "ARGOCD_TARGET_BRANCH": "main",
-            "APPS_CONFIG_PATH": "apps"
+        environments: {
+            dev: {
+                variables: {
+                },
+                templateParameters: {
+                    "APPS_TOP": "[one-color]",
+                    "ARGOCD_TARGET_BRANCH": "tmp",
+                    "POSTMAN_BRANCH": "develop",
+                    "TRIGGER_MESSAGE": "p4pa-auth"
+                }
+            },
+
         }
     },
     
@@ -42,6 +40,7 @@ const TEST_CONFIG = {
 
 describe('PipelineRunner Integration Tests', () => {
     let pipelineRunner: PipelineRunner;
+    const currentEnvironment = 'dev'; // o 'prod' per testare l'ambiente di produzione
 
     beforeEach(() => {
         process.env.GITHUB_REPOSITORY = TEST_CONFIG.github.repository;
@@ -57,9 +56,9 @@ describe('PipelineRunner Integration Tests', () => {
                 case 'azure-devops-token':
                     return TEST_CONFIG.azureDevOps.token;
                 case 'azure-pipeline-variables':
-                    return JSON.stringify(TEST_CONFIG.pipeline.variables);
+                    return JSON.stringify(TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].variables);
                 case 'azure-template-parameters':
-                    return JSON.stringify(TEST_CONFIG.pipeline.templateParameters);
+                    return JSON.stringify(TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].templateParameters);
                 default:
                     return '';
             }
@@ -70,7 +69,10 @@ describe('PipelineRunner Integration Tests', () => {
         });
 
         jest.spyOn(core, 'debug').mockImplementation((message: string) => {
-            console.debug('Debug:', message);
+            console.log('Debug:', message);
+            if (message.includes('validation')) {
+                console.log('Validation details:', message);
+            }
         });
 
         pipelineRunner = new PipelineRunner(TaskParameters.getTaskParams());
@@ -89,16 +91,28 @@ describe('PipelineRunner Integration Tests', () => {
                 repository: pipelineRunner.repository,
                 branch: pipelineRunner.branch,
                 pipelineName: TEST_CONFIG.pipeline.name,
-                templateParams: TEST_CONFIG.pipeline.templateParameters
+                environment: currentEnvironment,
+                variables: TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].variables,
+                templateParams: TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].templateParameters
             });
 
             await pipelineRunner.start();
             expect(true).toBeTruthy();
         } catch (error) {
-            if (error instanceof Error && error.message.includes('validation errors')) {
-                console.log('Analyzing validation error details...');
-                console.log('Error:', error);
-                expect(true).toBeTruthy();
+            if (error instanceof Error) {
+                console.error('Pipeline execution details:', {
+                    message: error.message,
+                    validationResults: (error as any).validationResults,
+                    details: (error as any).details || 'No additional details',
+                    response: (error as any).response
+                });
+
+                if (error.message.includes('validation errors')) {
+                    console.log('Analyzing validation error details...');
+                    expect(true).toBeTruthy();
+                } else {
+                    fail(error);
+                }
             } else {
                 fail(error);
             }
@@ -144,10 +158,10 @@ describe('PipelineRunner Integration Tests', () => {
         expect(taskParams.azurePipelineName).toBe(TEST_CONFIG.pipeline.name);
         
         const parsedVariables = JSON.parse(taskParams.azurePipelineVariables);
-        expect(parsedVariables).toEqual(TEST_CONFIG.pipeline.variables);
+        expect(parsedVariables).toEqual(TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].variables);
         
         const parsedParameters = JSON.parse(taskParams.azureTemplateParameters);
-        expect(parsedParameters).toEqual(TEST_CONFIG.pipeline.templateParameters);
+        expect(parsedParameters).toEqual(TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].templateParameters);
     });
 
     it('should have correct repository configuration', () => {
@@ -158,19 +172,19 @@ describe('PipelineRunner Integration Tests', () => {
 
     it('should correctly parse pipeline variables', () => {
         const parsedVariables = JSON.parse(pipelineRunner.taskParameters.azurePipelineVariables);
-        expect(parsedVariables).toHaveProperty('DEV_AGENT_POOL');
-        expect(parsedVariables).toHaveProperty('ENVIRONMENT');
-        expect(parsedVariables.DEV_AGENT_POOL).toBe(TEST_CONFIG.pipeline.variables.DEV_AGENT_POOL);
-        expect(parsedVariables.ENVIRONMENT).toBe(TEST_CONFIG.pipeline.variables.ENVIRONMENT);
+        const envVars = TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].variables;
+        Object.keys(envVars).forEach(key => {
+            expect(parsedVariables).toHaveProperty(key);
+            expect(parsedVariables[key]).toBe(envVars[key as keyof typeof envVars]);
+        });
     });
 
     it('should correctly parse template parameters', () => {
         const parsedParameters = JSON.parse(pipelineRunner.taskParameters.azureTemplateParameters);
-        expect(parsedParameters).toHaveProperty('ENVIRONMENT');
-        expect(parsedParameters).toHaveProperty('DEPLOY_TYPE');
-        expect(parsedParameters).toHaveProperty('APP_NAME');
-        expect(parsedParameters.ENVIRONMENT).toBe(TEST_CONFIG.pipeline.templateParameters.ENVIRONMENT);
-        expect(parsedParameters.DEPLOY_TYPE).toBe(TEST_CONFIG.pipeline.templateParameters.DEPLOY_TYPE);
-        expect(parsedParameters.APP_NAME).toBe(TEST_CONFIG.pipeline.templateParameters.APP_NAME);
+        const envParams = TEST_CONFIG.pipeline.environments[currentEnvironment as keyof typeof TEST_CONFIG.pipeline.environments].templateParameters;
+        Object.keys(envParams).forEach(key => {
+            expect(parsedParameters).toHaveProperty(key);
+            expect(parsedParameters[key]).toBe(envParams[key as keyof typeof envParams]);
+        });
     });
 });
